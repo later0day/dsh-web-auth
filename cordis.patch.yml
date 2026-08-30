@@ -1,0 +1,14 @@
+# dsh-web-auth bundle patch — applied as a profile bundle layer, after
+# @deepseek-ai/dsh-base and @deepseek-ai/dsh-web-app (which define the
+# `webserver`, `connection`, and `credentials` rows this plugin injects).
+# Purely additive: it inserts the login route plane in front of the existing
+# homepage without touching the `/` or `/api` guards.
+#
+# This row carries NO users: an empty user list fails loud at boot by design,
+# so the operator supplies `users` (and enrolls each password offline — see the
+# package README) through the profile-local cordis.patch.yml config override
+# keyed by this row's id. That keeps the account list a machine-local choice,
+# not something that travels with the package.
+- insert:
+    - id: web-auth
+      name: '@deepseek-ai/dsh-web-auth'
