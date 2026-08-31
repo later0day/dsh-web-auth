@@ -56,13 +56,20 @@ export interface RouteDeps {
  * Derive the request authority for the post-login redirect base URL. The
  * request has already passed `requestRejection`, so its Host header names a
  * configured trusted authority; `authenticatedUrl` normalizes path and query.
+ * A TLS-terminating reverse proxy forwards `x-forwarded-proto: https` while
+ * talking to this server over plain HTTP, so the scheme is read from that
+ * header when present — otherwise a browser on https would be redirected to an
+ * http URL the proxy does not serve. Only `http` and `https` are honored; any
+ * other forwarded value falls back to http.
  * @param req - the fenced login request.
- * @returns an `http://<authority>` base URL, or undefined when the Host header is absent.
+ * @returns a `<scheme>://<authority>` base URL, or undefined when the Host header is absent.
  */
 function baseUrlFor(req: IncomingMessage): string | undefined {
   const host = header(req, 'host')
   if (host === undefined || host.length === 0) return undefined
-  return `http://${host}`
+  const forwarded = header(req, 'x-forwarded-proto')?.split(',')[0]?.trim()
+  const scheme = forwarded === 'https' ? 'https' : 'http'
+  return `${scheme}://${host}`
 }
 
 /**

@@ -1,8 +1,14 @@
 /**
  * node:http helpers shared by the login routes: case-insensitive header
  * reads, a byte-bounded urlencoded form-body reader, and a reply helper that
- * forces `no-store` and `no-referrer` on every auth response so credentials
- * and the bridged token never enter a cache or a Referer header.
+ * forces `no-store` and `same-origin` referrer on every auth response so
+ * credentials and the bridged token never enter a cache or a cross-site
+ * Referer. `same-origin` (not `no-referrer`) is required: under `no-referrer`
+ * a browser downgrades the Origin header of the login form's own same-origin
+ * POST to the opaque literal "null", which Connection's request fence refuses
+ * as cross-site (api-request-trust.ts), so every real-browser login 403s.
+ * `same-origin` keeps the real Origin on the same-origin submit while still
+ * stripping Referer entirely on any cross-site navigation.
  * @module @deepseek-ai/dsh-web-auth/http
  */
 
@@ -65,7 +71,7 @@ export function reply(
 ): void {
   res.writeHead(status, {
     'cache-control': 'no-store',
-    'referrer-policy': 'no-referrer',
+    'referrer-policy': 'same-origin',
     ...headers,
   })
   res.end(body)

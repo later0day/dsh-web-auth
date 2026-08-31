@@ -152,7 +152,11 @@ describe('login routes', () => {
     await get(fakeGet(), res)
     expect(captured.status).toBe(200)
     expect(captured.headers['cache-control']).toBe('no-store')
-    expect(captured.headers['referrer-policy']).toBe('no-referrer')
+    // same-origin (not no-referrer): under no-referrer the browser sends the
+    // login form's own same-origin POST with Origin: null, which Connection's
+    // request fence refuses — see http.ts. same-origin keeps the real Origin on
+    // the submit while still stripping Referer on cross-site navigations.
+    expect(captured.headers['referrer-policy']).toBe('same-origin')
     expect(captured.headers['content-security-policy']).toContain("default-src 'none'")
     expect(String(captured.headers['set-cookie'])).toContain('SameSite=Strict')
     // The cookie must be scoped to a path the POST route (/auth/login) sends
@@ -213,6 +217,20 @@ describe('login routes', () => {
     expect(authenticatedUrlCalls).toEqual([`http://${HOST}`])
     // The token appears only in the redirect Location, never in a page body.
     expect(captured.body).toBe('')
+  })
+
+  it('honors x-forwarded-proto:https so the redirect stays on https behind a TLS proxy', async () => {
+    const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
+    const { get, post, authenticatedUrlCalls } = boot({ rejection: () => 401, records })
+    const { nonce, cookie } = await mintNonce(get)
+    const { res, captured } = fakeRes()
+    await post(fakePost(
+      { 'content-type': 'application/x-www-form-urlencoded', cookie, 'x-forwarded-proto': 'https' },
+      `username=alice&password=s3cret&nonce=${nonce}`,
+    ), res)
+    expect(captured.status).toBe(303)
+    expect(captured.headers.location).toBe(`https://${HOST}/?token=LAUNCH`)
+    expect(authenticatedUrlCalls).toEqual([`https://${HOST}`])
   })
 
   it('locks a username after the attempt limit and answers 429 before scrypt', async () => {
