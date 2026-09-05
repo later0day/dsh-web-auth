@@ -40,7 +40,7 @@ Every plugin route additionally calls `connection.requestRejection` first, **reu
 
 ## Login flow
 
-**`GET /login`** — `403` → 403; already authenticated → 302 `/`; otherwise render the form with a fresh single-use CSRF nonce (delivered as a `SameSite=Strict; HttpOnly; Path=/` cookie and a hidden field), `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and a strict `Content-Security-Policy` (`default-src 'none'`; inline style only; `form-action 'self'`). The page is self-contained — no external asset URLs.
+**`GET /login`** — `403` → 403; already authenticated → 302 `/`; otherwise render the form with a fresh single-use CSRF nonce (delivered as a `SameSite=Strict; HttpOnly; Path=/` cookie and a hidden field), `Cache-Control: no-store`, `Referrer-Policy: same-origin` (deliberately not `no-referrer` — that would null the Origin header on the login form's own same-origin POST, which Connection's request fence then refuses as cross-site, 403ing every real-browser login), and a strict `Content-Security-Policy` (`default-src 'none'`; inline style only; `form-action 'self'`). The page is self-contained — no external asset URLs.
 
 **`POST /auth/login`** — non-POST → 405; `403` → 403; already authenticated → 303 `/`. Otherwise: read the bounded form body → require the single-use nonce to match its Strict cookie (mismatch → 403, before any credential work) → throttle check per username **and** per source, refusing a locked key with 429 *before* scrypt runs so a locked attacker spends no CPU → `verifyPassword` in constant time. On failure, record the attempt and re-render the form with 401. On success, reset the throttle and 303-redirect to `connection.authenticatedUrl('http://<request-Host>')`.
 
