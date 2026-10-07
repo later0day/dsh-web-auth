@@ -41,11 +41,11 @@ const DEFAULT_LOCKOUT_SECONDS = 300
 /** Default login-form nonce lifetime in seconds. */
 const DEFAULT_NONCE_TTL_SECONDS = 300
 
-const userSchema: z<UserConfig> = z.object({
+const userSchema = z.object({
   username: z.string().required(),
 })
 
-export const Config: z<Config> = z.object({
+export const Config = z.object({
   users: z.array(userSchema).default([]),
   maxAttempts: z.natural().min(1).default(DEFAULT_MAX_ATTEMPTS),
   lockoutSeconds: z.natural().min(1).default(DEFAULT_LOCKOUT_SECONDS),
