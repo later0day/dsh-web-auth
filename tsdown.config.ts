@@ -5,13 +5,12 @@ import { defineConfig } from 'tsdown'
 const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
 
 export default defineConfig([
-  // Host half only: Node ESM bundle for the plugin entry and invariant companion.
+  // Host half only: Node ESM bundle for the plugin entry.
   // No client half — this plugin serves HTTP routes and mounts no browser UI.
   {
     name: pkg.name,
     entry: {
       index: 'src/index.ts',
-      invariant: 'src/invariant.ts',
     },
     outDir: 'lib',
     format: ['esm'],

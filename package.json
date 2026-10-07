@@ -11,10 +11,6 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./invariant": {
-      "types": "./lib/types/invariant.d.ts",
-      "default": "./lib/invariant.js"
-    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
@@ -23,7 +19,6 @@
   },
   "files": [
     "lib/index.js",
-    "lib/invariant.js",
     "lib/types/**/*.d.ts",
     "src",
     "cordis.patch.yml",
@@ -47,8 +42,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": "^0.1.1-rc.1 || ^0.2.0-rc.2",
     "@deepseek-ai/dsh-credentials": "^0.1.1-rc.1 || ^0.2.0-rc.2",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.1 || ^0.2.0-rc.2",
-    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.1 || ^0.2.0-rc.2"
+    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.1 || ^0.2.0-rc.2"
   },
   "dependencies": {
     "@deepseek-ai/cosmokit": "1.8.5",
@@ -59,7 +53,6 @@
     "@deepseek-ai/dsh-client-connection": "link:/Users/later0day/Desktop/DSH/deepseek-harness/packages/client/connection",
     "@deepseek-ai/dsh-credentials": "link:/Users/later0day/Desktop/DSH/deepseek-harness/packages/credentials/credentials",
     "@deepseek-ai/dsh-host-webserver": "link:/Users/later0day/Desktop/DSH/deepseek-harness/packages/host/webserver",
-    "@deepseek-ai/dsh-invariants": "link:/Users/later0day/Desktop/DSH/deepseek-harness/packages/runtime-diagnostics/invariants",
     "@types/node": "^24.0.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.6.0",

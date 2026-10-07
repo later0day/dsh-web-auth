@@ -27,9 +27,6 @@ importers:
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:/Users/later0day/Desktop/DSH/deepseek-harness/packages/host/webserver
         version: link:../../deepseek-harness/packages/host/webserver
-      '@deepseek-ai/dsh-invariants':
-        specifier: link:/Users/later0day/Desktop/DSH/deepseek-harness/packages/runtime-diagnostics/invariants
-        version: link:../../deepseek-harness/packages/runtime-diagnostics/invariants
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3
