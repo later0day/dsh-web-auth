@@ -2,11 +2,11 @@
 
 A username/password login gate for the DSH Web profile. It adds a login page and a credential-submission route in front of the existing homepage, so the Web GUI can be reached over a LAN without handing every visitor the process launch token printed on the operator's console.
 
-It **adds two routes only** — `GET /login` and `POST /auth/login` — and never touches the harness's existing `/` and `/api` guards. On a correct password it does not mint its own session; it redirects the browser back into the harness's own token→cookie exchange (`connection.authenticatedUrl`), so the cookie a logged-in user carries is the ordinary harness browser-session cookie. The plugin therefore gates access without owning or weakening the request fence.
+It **adds two routes only** — `GET /login` and `POST /auth/login`, both declared `auth: 'anonymous'` so the 0.2.2-rc.3 default-`required` policy does not 503 the login form itself — and never weakens the harness's existing `/` and `/api` guards. On a correct password it mints this plugin's own signed, authority-bound session cookie, and the authentication provider registered on `connection.authentication` returns an owner Peer for every later request carrying it. Unauthenticated browser *navigations* are redirected to `/login`; the SPA's API calls still receive a real 401. The plugin gates access without bypassing the request fence.
 
 ## Why this exists
 
-`dsh --profile web` binds `127.0.0.1` by default, and the `--host 0.0.0.0` CLI flag is deliberately blocked: exposing the RCE-capable API to the network with only a console-printed token is not a login. The harness homepage *is* already gated — `frontend-static` calls `connection.authorizeIndex` before serving `index.html`, and `/api` is guarded by `connection.requestRejection` — but its "login" is a launch token an operator would have to forward as a whole `?token=` URL, which is a shared bearer secret, not per-person sign-in. This plugin fills that gap with a password form and bridges a success back to the harness token exchange.
+`dsh --profile web` binds `127.0.0.1` by default, and the `--host 0.0.0.0` CLI flag is deliberately blocked: exposing the RCE-capable API to the network with only a console-printed token is not a login. Since 0.2.2-rc.3 the harness authenticates through the `ConnectionAuthentication` provider registry — routes default to `auth: 'required'` and admission needs a live Peer — but the built-in provider's login is still a launch token an operator would have to forward as a whole `?token=` URL, which is a shared bearer secret, not per-person sign-in. This plugin fills that gap with a password form and its own cookie-backed provider.
 
 ## Config
 
@@ -17,7 +17,7 @@ It **adds two routes only** — `GET /login` and `POST /auth/login` — and neve
 | `lockoutSeconds` | `300` | Lockout window after the attempt limit is reached. |
 | `nonceTtlSeconds` | `300` | Login-form CSRF nonce lifetime. |
 
-There is deliberately **no session-TTL field**: the logged-in session is the harness browser cookie, whose lifetime is owned by `client-connection`'s `cookieMaxAgeDays`. This plugin reuses that cookie and cannot shorten it; its own time knobs govern only nonce freshness and the throttle window.
+There is deliberately **no session-TTL field**: the session cookie's lifetime is a fixed 30-day security bound owned by this plugin (it survived a server restart through its persisted signing secret); the plugin's other time knobs govern only nonce freshness and the throttle window.
 
 `resolveUsers` validates the list at load — an empty list, an empty username, or a duplicate username fails loudly at boot rather than serving a login page no one can pass.
 
@@ -32,19 +32,23 @@ The web server dispatcher normalizes the request path exactly once — `new URL(
 | `/api/../login` | `/login` | the login page (public by design) |
 | `/login/../api/run` | `/api/run` | the `/api` prefix — **still guarded** by the harness |
 | `/api/..%2flogin` | `/api/..%2flogin` (`%2f` is not decoded) | the `/api` prefix — guarded |
-| `/api/%2e%2e/` | `/` | the fallback homepage — guarded by `authorizeIndex` |
+| `/api/%2e%2e/` | `/` | the fallback homepage — guarded by the authorize step |
 
 Three properties hold: normalization happens once and before matching (no "normalized to A, dispatched to B" window); `%2f` is not decoded, so an encoded slash cannot forge a path segment; and there is no overlapping fallback the plugin's routes can steal `/` or `/api` traffic into. The added routes sort ahead of the fallback but can never capture a `/` or `/api` request.
 
-Every plugin route additionally calls `connection.requestRejection` first, **reusing** the harness's own Host/Origin fence and browser-authentication state rather than reimplementing either. Its three outcomes drive the flow: `403` (untrusted Host or cross-site) is refused, `undefined` (already authenticated) is sent to `/`, and only `401` (fenced but unauthenticated) reaches the password flow.
+Both plugin routes are admitted through the webserver's `authorize` step, where Connection's `webserver/authorize` listener applies the same Host/Origin fence it applies to every other route — anonymous policy does not skip the fence, so a cross-site or untrusted-Host request is refused with 403 before the handler runs. A request the provider authenticates reaches the handler with its Peer and is redirected to `/` without showing the form.
 
 ## Login flow
 
-**`GET /login`** — `403` → 403; already authenticated → 302 `/`; otherwise render the form with a fresh single-use CSRF nonce (delivered as a `SameSite=Strict; HttpOnly; Path=/` cookie and a hidden field), `Cache-Control: no-store`, `Referrer-Policy: same-origin` (deliberately not `no-referrer` — that would null the Origin header on the login form's own same-origin POST, which Connection's request fence then refuses as cross-site, 403ing every real-browser login), and a strict `Content-Security-Policy` (`default-src 'none'`; inline style only; `form-action 'self'`). The page is self-contained — no external asset URLs.
+**`GET /login`** — cross-site or untrusted Host → 403 (from the authorize step); already authenticated → 302 `/`; otherwise render the form with a fresh single-use CSRF nonce (delivered as a `SameSite=Strict; HttpOnly; Path=/` cookie and a hidden field), `Cache-Control: no-store`, `Referrer-Policy: same-origin` (deliberately not `no-referrer` — that would null the Origin header on the login form's own same-origin POST, which Connection's request fence then refuses as cross-site, 403ing every real-browser login), and a strict `Content-Security-Policy` (`default-src 'none'`; inline style only; `form-action 'self'`). The page is self-contained — no external asset URLs.
 
-**`POST /auth/login`** — non-POST → 405; `403` → 403; already authenticated → 303 `/`. Otherwise: read the bounded form body → require the single-use nonce to match its Strict cookie (mismatch → 403, before any credential work) → throttle check per username **and** per source, refusing a locked key with 429 *before* scrypt runs so a locked attacker spends no CPU → `verifyPassword` in constant time. On failure, record the attempt and re-render the form with 401. On success, reset the throttle and 303-redirect to `connection.authenticatedUrl('http://<request-Host>')`.
+**`POST /auth/login`** — non-POST → 405; already authenticated → 303 `/`. Otherwise: read the bounded form body → require the single-use nonce to match its Strict cookie (mismatch → 403, before any credential work) → throttle check per username **and** per source, refusing a locked key with 429 *before* scrypt runs so a locked attacker spends no CPU → `verifyPassword` in constant time. On failure, record the attempt and re-render the form with 401. On success, reset the throttle, mint the session cookie, and 303-redirect to the clean `/`.
 
-The browser then follows that redirect to `/?token=…`; `frontend-static` and `authorizeIndex` mint the harness cookie and strip the token with their own no-referrer 303. **The token appears only in that one success redirect's `Location` header — never in a page body and never in a log.**
+The browser follows the redirect to `/` carrying the cookie; the provider accepts it on every later request, which admits the page and `/api` through the ordinary `auth: 'required'` policy. **No token, URL query, or page body ever carries a credential; the cookie value is HMAC-signed and authority-bound.**
+
+## Session cookie
+
+The cookie (`dsh-web-auth-session`, `HttpOnly; SameSite=Strict; Path=/`, plus `Secure` on a TLS listener) is `v1.<base64url JSON>.<HMAC-SHA256>` over `{ authority, issuedAt, expiresAt }`. The signing secret is a persistent `grant` record (`dsh-web-auth/session-secret`) in the credentials service, so sessions survive a restart; its audience is the request authority (origin under TLS, host otherwise), so a cookie minted for one Host is refused on another. Verification rejects any wrong signature, wrong authority, or expired payload.
 
 ## Password verification
 
@@ -82,7 +86,7 @@ Enable the plugin through a user overlay — a profile's `cordis.patch.yml` unde
       - username: alice
 ```
 
-`inject: ['webServer', 'connection', 'credentials']` orders mounting correctly regardless of the entry's position in the file.
+`inject: ['webServer', 'connection', 'connection.authentication', 'credentials']` orders mounting correctly regardless of the entry's position in the file.
 
 ### Binding to a LAN (optional, with tradeoffs)
 
@@ -106,9 +110,10 @@ None. This plugin adds HTTP routes for browser login and contributes nothing to 
 
 ## Known Limitations and Deferred Work
 
-- **Coarse revocation only** — deleting a user's credential record blocks *future* logins, but an already-issued harness cookie stays valid up to `cookieMaxAgeDays` (minimum 1 day). There is no per-user immediate kick; the only emergency "log everyone out" is rotating the `client-connection` browser-session HMAC secret, which signs out the operator too.
-- **No per-user identity above the gate** — the minted cookie is the shared authority-bound harness cookie, not a per-user session; there are no roles and no audit trail of who logged in.
+- **Coarse revocation only** — deleting a user's credential record blocks *future* logins, but an already-issued session cookie stays valid up to its 30-day bound. There is no per-user immediate kick; the emergency "log everyone out" is deleting the `dsh-web-auth/session-secret` record (sessions die on the next request; the next login re-creates it).
+- **No per-user identity above the gate** — every login maps to the same owner Peer; there are no roles and no audit trail of who logged in.
 - **In-memory throttle** — attempt counts are per process and reset on restart; the `GET /login` render path is not rate-limited.
 - **Offline password enrollment only** — no interactive set-password command; see [Enrolling a password](#enrolling-a-password).
 - **Plain HTTP over a LAN** unless external TLS termination is added.
-- **Cross-site defense inherits the harness threat model** — it relies on the browser's Fetch-Metadata/Origin signals through `connection.requestRejection`; this plugin does not change that model.
+- **Cross-site defense inherits the harness threat model** — it relies on the browser's Fetch-Metadata/Origin signals through the webserver authorize step; this plugin does not change that model.
+- **401-to-login redirect is heuristic** — the `webserver/request` rewriter redirects only `sec-fetch-mode: navigate` requests; a navigation without that header (older browsers) still sees the bare 401 body.

@@ -3,9 +3,10 @@ import { createHash, randomBytes, scryptSync } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialKey, CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
-import type { ConnectionRequestRejection, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { ConnectionTrustRequest, HostConnectionHandle, PeerScope } from '@deepseek-ai/dsh-client-connection'
 import type { WebRoute, WebServer } from '@deepseek-ai/dsh-host-webserver'
 import { applyRoutes } from '../src/routes.ts'
+import { SESSION_COOKIE, readSessionCookie } from '../src/session.ts'
 import { NONCE_COOKIE } from '../src/nonce.ts'
 import { PASSWORD_PAYLOAD_VERSION } from '../src/password-record.ts'
 
@@ -52,6 +53,8 @@ function fakeRes(): { res: import('node:http').ServerResponse; captured: Capture
       if (body !== undefined) captured.body = body
       return this
     },
+    destroyed: false,
+    headersSent: false,
   }
   return { res: res as unknown as import('node:http').ServerResponse, captured }
 }
@@ -64,46 +67,86 @@ function fakePost(headers: Record<string, string>, body: string): import('node:h
     method: 'POST',
     url: '/auth/login',
     headers: { host: HOST, 'sec-fetch-site': 'same-origin', ...headers },
+    socket: { destroyed: false },
   })
   return req
 }
 
 function fakeGet(headers: Record<string, string> = {}): import('node:http').IncomingMessage {
-  return { method: 'GET', url: '/login', headers: { host: HOST, ...headers } } as unknown as import('node:http').IncomingMessage
+  return {
+    method: 'GET',
+    url: '/login',
+    headers: { host: HOST, ...headers },
+    socket: { destroyed: false },
+  } as unknown as import('node:http').IncomingMessage
 }
 
-/** Harness under test: capture both route handlers over fakes. */
-function boot(options: {
-  rejection: () => ConnectionRequestRejection
+/** A Peer stand-in with the identity fields the routes read. */
+function fakePeer(): PeerScope {
+  return {
+    id: 'peer-1' as never,
+    principal: { kind: 'owner' },
+    signal: new AbortController().signal,
+  } as unknown as PeerScope
+}
+
+/**
+ * Harness under test: capture the route handlers and the registered
+ * authentication provider over fakes. `admitted` controls the Peer the
+ * webserver passes the handlers (the provider's decision for this request).
+ */
+async function boot(options: {
   records?: Map<string, CredentialRecord>
   users?: Set<string>
   maxAttempts?: number
-}): { get: WebRoute['handler']; post: WebRoute['handler']; authenticatedUrlCalls: string[] } {
+}): {
+  get: WebRoute['handler']
+  post: WebRoute['handler']
+  providerAuthenticate: (headers: Record<string, string>) => PeerScope | undefined
+} {
   const routes = new Map<string, WebRoute['handler']>()
   const webServer = {
     register(route: WebRoute) {
       routes.set(route.path, route.handler)
       return () => routes.delete(route.path)
     },
+    protocol: 'http:',
   } as unknown as WebServer
 
-  const authenticatedUrlCalls: string[] = []
+  const peer = fakePeer()
+  let provider: { authenticate(request: ConnectionTrustRequest): PeerScope | undefined }
   const connection = {
-    requestRejection: () => options.rejection(),
-    authenticatedUrl: (base: string) => {
-      authenticatedUrlCalls.push(base)
-      return `${base}/?token=LAUNCH`
+    createPeer: () => peer,
+    authentication: {
+      register(p: typeof provider) {
+        provider = p
+        return () => Promise.resolve()
+      },
     },
   } as unknown as HostConnectionHandle
 
   const records = options.records ?? new Map<string, CredentialRecord>()
   const credentials = {
     readRecord: (key: CredentialKey) => Promise.resolve(records.get(key as string)),
+    modifyRecord: (key: CredentialKey, write: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>) =>
+      write(records.get(key as string)).then((next) => {
+        if (next !== undefined) records.set(key as string, next)
+        return records.get(key as string)
+      }),
   } as unknown as CredentialProvider
 
-  const ctx = { effect: (setup: () => unknown) => { setup() } } as unknown as Context
+  const listeners = new Map<string, Function[]>()
+  const ctx = {
+    effect: (setup: () => unknown) => { setup() },
+    get: (name: string) => (name === 'webServer' ? webServer : undefined),
+    on: (event: string, listener: Function) => {
+      const list = listeners.get(event) ?? []
+      list.push(listener)
+      listeners.set(event, list)
+    },
+  } as unknown as Context
 
-  applyRoutes(ctx, {
+  await applyRoutes(ctx, {
     webServer,
     connection,
     credentials,
@@ -116,7 +159,8 @@ function boot(options: {
   return {
     get: routes.get('/login')!,
     post: routes.get('/auth/login')!,
-    authenticatedUrlCalls,
+    providerAuthenticate: (headers: Record<string, string>) =>
+      provider.authenticate({ headers, method: 'GET', url: '/' }),
   }
 }
 
@@ -131,23 +175,16 @@ async function mintNonce(get: WebRoute['handler']): Promise<{ nonce: string; coo
 }
 
 describe('login routes', () => {
-  it('GET /login on a cross-site or untrusted-Host request answers 403', async () => {
-    const { get } = boot({ rejection: () => 403 })
-    const { res, captured } = fakeRes()
-    await get(fakeGet(), res)
-    expect(captured.status).toBe(403)
-  })
-
   it('GET /login when already authenticated redirects to /', async () => {
-    const { get } = boot({ rejection: () => undefined })
+    const { get } = await boot({})
     const { res, captured } = fakeRes()
-    await get(fakeGet(), res)
+    await get(fakeGet(), res, fakePeer())
     expect(captured.status).toBe(302)
     expect(captured.headers.location).toBe('/')
   })
 
-  it('GET /login renders the form with no-store and a Strict nonce cookie', async () => {
-    const { get } = boot({ rejection: () => 401 })
+  it('GET /login unauthenticated renders the form with no-store and a Strict nonce cookie', async () => {
+    const { get } = await boot({})
     const { res, captured } = fakeRes()
     await get(fakeGet(), res)
     expect(captured.status).toBe(200)
@@ -165,7 +202,7 @@ describe('login routes', () => {
   })
 
   it('POST rejects a non-POST method with 405', async () => {
-    const { post } = boot({ rejection: () => 401 })
+    const { post } = await boot({})
     const { res, captured } = fakeRes()
     const req = fakeGet()
     await post(req, res)
@@ -173,14 +210,14 @@ describe('login routes', () => {
   })
 
   it('POST with a missing nonce is forbidden before any credential work', async () => {
-    const { post } = boot({ rejection: () => 401 })
+    const { post } = await boot({})
     const { res, captured } = fakeRes()
     await post(fakePost({ 'content-type': 'application/x-www-form-urlencoded' }, 'username=alice&password=s3cret'), res)
     expect(captured.status).toBe(403)
   })
 
   it('POST with a cookie/field nonce mismatch is forbidden', async () => {
-    const { get, post } = boot({ rejection: () => 401 })
+    const { get, post } = await boot({})
     const { nonce } = await mintNonce(get)
     const { res, captured } = fakeRes()
     await post(fakePost(
@@ -192,7 +229,7 @@ describe('login routes', () => {
 
   it('POST with a valid nonce but wrong password re-renders 401', async () => {
     const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
-    const { get, post } = boot({ rejection: () => 401, records })
+    const { get, post } = await boot({ records })
     const { nonce, cookie } = await mintNonce(get)
     const { res, captured } = fakeRes()
     await post(fakePost(
@@ -203,9 +240,9 @@ describe('login routes', () => {
     expect(captured.body).toContain('role="alert"')
   })
 
-  it('POST with the correct password bridges to authenticatedUrl via 303', async () => {
+  it('POST with the correct password mints a session cookie and redirects to /', async () => {
     const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
-    const { get, post, authenticatedUrlCalls } = boot({ rejection: () => 401, records })
+    const { get, post, providerAuthenticate } = await boot({ records })
     const { nonce, cookie } = await mintNonce(get)
     const { res, captured } = fakeRes()
     await post(fakePost(
@@ -213,29 +250,43 @@ describe('login routes', () => {
       `username=alice&password=s3cret&nonce=${nonce}`,
     ), res)
     expect(captured.status).toBe(303)
-    expect(captured.headers.location).toBe(`http://${HOST}/?token=LAUNCH`)
-    expect(authenticatedUrlCalls).toEqual([`http://${HOST}`])
-    // The token appears only in the redirect Location, never in a page body.
+    expect(captured.headers.location).toBe('/')
     expect(captured.body).toBe('')
+    // The minted cookie authenticates the very next request via the provider.
+    const setCookie = String(captured.headers['set-cookie'])
+    expect(setCookie).toContain(`${SESSION_COOKIE}=`)
+    expect(setCookie).toContain('HttpOnly')
+    expect(setCookie).toContain('SameSite=Strict')
+    const session = readSessionCookie(setCookie.split(';')[0])
+    const accepted = providerAuthenticate({ host: HOST, cookie: `${SESSION_COOKIE}=${session}` })
+    expect(accepted).toBeDefined()
+    expect(accepted!.principal).toEqual({ kind: 'owner' })
+    // A wrong-authority cookie does not authenticate.
+    const foreign = providerAuthenticate({ host: 'evil.example:1', cookie: `${SESSION_COOKIE}=${session}` })
+    expect(foreign).toBeUndefined()
+    // Neither does a request without any cookie.
+    expect(providerAuthenticate({ host: HOST })).toBeUndefined()
   })
 
-  it('honors x-forwarded-proto:https so the redirect stays on https behind a TLS proxy', async () => {
+  it('a tampered session cookie value does not authenticate', async () => {
     const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
-    const { get, post, authenticatedUrlCalls } = boot({ rejection: () => 401, records })
+    const { get, post, providerAuthenticate } = await boot({ records })
     const { nonce, cookie } = await mintNonce(get)
     const { res, captured } = fakeRes()
     await post(fakePost(
-      { 'content-type': 'application/x-www-form-urlencoded', cookie, 'x-forwarded-proto': 'https' },
+      { 'content-type': 'application/x-www-form-urlencoded', cookie },
       `username=alice&password=s3cret&nonce=${nonce}`,
     ), res)
-    expect(captured.status).toBe(303)
-    expect(captured.headers.location).toBe(`https://${HOST}/?token=LAUNCH`)
-    expect(authenticatedUrlCalls).toEqual([`https://${HOST}`])
+    const setCookie = String(captured.headers['set-cookie'])
+    const session = readSessionCookie(setCookie.split(';')[0])!
+    const parts = session.split('.')
+    const tampered = `${parts[0]}.${parts[1]}.${'A'.repeat(parts[2]!.length)}`
+    expect(providerAuthenticate({ host: HOST, cookie: `${SESSION_COOKIE}=${tampered}` })).toBeUndefined()
   })
 
   it('locks a username after the attempt limit and answers 429 before scrypt', async () => {
     const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
-    const { get, post } = boot({ rejection: () => 401, records, maxAttempts: 2 })
+    const { get, post } = await boot({ records, maxAttempts: 2 })
     for (let i = 0; i < 2; i += 1) {
       const { nonce, cookie } = await mintNonce(get)
       const { res } = fakeRes()
@@ -255,9 +306,9 @@ describe('login routes', () => {
   })
 
   it('POST when already authenticated redirects to / with 303', async () => {
-    const { post } = boot({ rejection: () => undefined })
+    const { post } = await boot({})
     const { res, captured } = fakeRes()
-    await post(fakePost({ 'content-type': 'application/x-www-form-urlencoded' }, ''), res)
+    await post(fakePost({ 'content-type': 'application/x-www-form-urlencoded' }, ''), res, fakePeer())
     expect(captured.status).toBe(303)
     expect(captured.headers.location).toBe('/')
   })
