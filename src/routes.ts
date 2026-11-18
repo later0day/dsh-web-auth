@@ -119,15 +119,23 @@ export async function applyRoutes(ctx: Context, deps: RouteDeps): Promise<void> 
       await next()
       return
     }
-    // Observe the harness 401 before it is written: run the dispatch chain,
-    // and when it ended answering 401 without writing headers yet, redirect.
+    // Rewrite the harness 401 into the redirect as it is written. A post-hoc
+    // rewrite cannot work: the deny path calls `res.end()` right after
+    // `writeHead(401)`, and `end()` flushes headers synchronously, so by the
+    // time `next()` settles `headersSent` is already true. Converting inside
+    // the wrapper intercepts the status before anything reaches the socket;
+    // the caller's trailing `res.end('unauthorized')` then ends the 302
+    // (its body is ignored on a redirect; a browser follows `location`).
     let sawDeny = false
     const originalWriteHead = response.writeHead.bind(response)
     const instrumented = response.writeHead as unknown as { __dshWebAuthHook?: boolean }
     if (instrumented.__dshWebAuthHook !== true) {
       instrumented.__dshWebAuthHook = true
       response.writeHead = ((status: number, headers?: object) => {
-        if (status === 401) sawDeny = true
+        if (status === 401) {
+          sawDeny = true
+          return originalWriteHead(302, { 'cache-control': 'no-store', location: LOGIN_PATH })
+        }
         return originalWriteHead(status as never, headers as never)
       }) as typeof response.writeHead
     }
@@ -137,7 +145,7 @@ export async function applyRoutes(ctx: Context, deps: RouteDeps): Promise<void> 
       response.writeHead = originalWriteHead
       instrumented.__dshWebAuthHook = false
     }
-    if (sawDeny && !response.headersSent) {
+    if (sawDeny && !response.headersSent && !response.writableEnded) {
       response.writeHead(302, { 'cache-control': 'no-store', location: LOGIN_PATH })
       response.end()
     }
@@ -152,21 +160,21 @@ export async function applyRoutes(ctx: Context, deps: RouteDeps): Promise<void> 
     }, renderLoginPage(nonce, error))
   }
 
-  const handleGet = (req: IncomingMessage, res: ServerResponse, peerArg?: PeerScope): void => {
-    if (peerArg !== undefined) {
-      // Already authenticated (the provider accepted this request): no form.
+  const handleGet = (req: IncomingMessage, res: ServerResponse): void => {
+    if (sessions.verify(trustRequest(req), isSecure())) {
+      // Already authenticated (the cookie verifies): no form, back to the app.
       reply(res, 302, { location: '/' })
       return
     }
     renderForm(res, 200)
   }
 
-  const handlePost = async (req: IncomingMessage, res: ServerResponse, peerArg?: PeerScope): Promise<void> => {
+  const handlePost = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (req.method !== 'POST') {
       reply(res, 405, { allow: 'POST' }, 'method not allowed')
       return
     }
-    if (peerArg !== undefined) {
+    if (sessions.verify(trustRequest(req), isSecure())) {
       reply(res, 303, { location: '/' })
       return
     }

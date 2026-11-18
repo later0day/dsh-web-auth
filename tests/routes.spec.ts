@@ -99,11 +99,11 @@ async function boot(options: {
   records?: Map<string, CredentialRecord>
   users?: Set<string>
   maxAttempts?: number
-}): {
+}): Promise<{
   get: WebRoute['handler']
   post: WebRoute['handler']
   providerAuthenticate: (headers: Record<string, string>) => PeerScope | undefined
-} {
+}> {
   const routes = new Map<string, WebRoute['handler']>()
   const webServer = {
     register(route: WebRoute) {
@@ -176,9 +176,17 @@ async function mintNonce(get: WebRoute['handler']): Promise<{ nonce: string; coo
 
 describe('login routes', () => {
   it('GET /login when already authenticated redirects to /', async () => {
-    const { get } = await boot({})
+    const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
+    const { get, post } = await boot({ records })
+    const { nonce, cookie } = await mintNonce(get)
+    const { res: _pres, captured: minted } = fakeRes()
+    await post(fakePost(
+      { 'content-type': 'application/x-www-form-urlencoded', cookie },
+      `username=alice&password=s3cret&nonce=${nonce}`,
+    ), _pres)
+    const session = readSessionCookie(String(minted.headers['set-cookie']).split(';')[0])!
     const { res, captured } = fakeRes()
-    await get(fakeGet(), res, fakePeer())
+    await get(fakeGet({ cookie: `${SESSION_COOKIE}=${session}` }), res)
     expect(captured.status).toBe(302)
     expect(captured.headers.location).toBe('/')
   })
@@ -306,9 +314,20 @@ describe('login routes', () => {
   })
 
   it('POST when already authenticated redirects to / with 303', async () => {
-    const { post } = await boot({})
+    const records = new Map([[keyFor('alice'), grantFor('s3cret')]])
+    const { get, post } = await boot({ records })
+    const { nonce, cookie } = await mintNonce(get)
+    const { res: _pres, captured: minted } = fakeRes()
+    await post(fakePost(
+      { 'content-type': 'application/x-www-form-urlencoded', cookie },
+      `username=alice&password=s3cret&nonce=${nonce}`,
+    ), _pres)
+    const session = readSessionCookie(String(minted.headers['set-cookie']).split(';')[0])!
     const { res, captured } = fakeRes()
-    await post(fakePost({ 'content-type': 'application/x-www-form-urlencoded' }, ''), res, fakePeer())
+    await post(fakePost(
+      { 'content-type': 'application/x-www-form-urlencoded', cookie: `${SESSION_COOKIE}=${session}` },
+      '',
+    ), res)
     expect(captured.status).toBe(303)
     expect(captured.headers.location).toBe('/')
   })
